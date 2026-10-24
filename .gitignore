@@ -1,0 +1,11 @@
+# Local state and diagnostics must never be committed.
+*.clixml
+*.reg
+*.pml
+*.csv
+*.log
+*.exe
+*.zip
+*.tmp
+screenshots/
+backups/
