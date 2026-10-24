@@ -3,7 +3,7 @@
 param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-Import-Module (Join-Path $PSScriptRoot '..\lib\GameBarFix.psm1') -Force
+. (Join-Path $PSScriptRoot '..\Fix-GameBar.ps1')
 
 # All registry operations are rooted in a newly created, random test-only key.
 $testPath = 'Software\GameBarPopupFixTests\' + [Guid]::NewGuid().ToString('N')
@@ -117,7 +117,62 @@ try {
     Assert-True ((Get-StateJson) -ceq $beforeConflict) 'Conflicting COM handler caused partial changes.'
     Pass 'Conflicting COM handlers rejected before apply'
 
-    Write-Host ("All $passed isolated registry tests passed.")
+    # Mock both Appx cmdlets: tests NEVER invoke the real package manager.
+    $script:mockPackages=@()
+    $script:removedPackages=@()
+    $script:failRemoval=$false
+    $script:keepPackage=$false
+    function Get-AppxPackage {
+        [CmdletBinding()]
+        param([string]$Name)
+        Assert-True ($Name -ceq 'Microsoft.XboxGamingOverlay') 'Package query was not narrowly scoped.'
+        $script:mockPackages
+    }
+    function Remove-AppxPackage {
+        [CmdletBinding()]
+        param([string]$Package)
+        if($script:failRemoval){throw 'Simulated removal failure'}
+        $script:removedPackages+=@($Package)
+        if(-not $script:keepPackage){$script:mockPackages=@($script:mockPackages | Where-Object {$_.PackageFullName -cne $Package})}
+    }
+    $sample=[pscustomobject]@{Name='Microsoft.XboxGamingOverlay';PublisherId='8wekyb3d8bbwe';PackageFullName='Microsoft.XboxGamingOverlay_1.0.0.0_x64__8wekyb3d8bbwe'}
+    Assert-True ((Remove-CurrentUserGameBar) -eq 0) 'Absent package should be a no-op.'
+    Assert-True ($script:removedPackages.Count -eq 0) 'Tried to remove an absent package.'
+    Pass 'Uninstall is a no-op if Game Bar is already absent (mocked Appx)'
+
+    $script:mockPackages=@($sample)
+    Assert-True ((Remove-CurrentUserGameBar -WhatIf) -eq 0) 'WhatIf attempted package removal.'
+    Assert-True ($script:removedPackages.Count -eq 0 -and $script:mockPackages.Count -eq 1) 'WhatIf mutated package state.'
+    Pass 'Uninstall WhatIf never calls Remove-AppxPackage (mocked Appx)'
+
+    Assert-True ((Remove-CurrentUserGameBar) -eq 1) 'Installed Game Bar was not removed.'
+    Assert-True ($script:removedPackages.Count -eq 1 -and $script:removedPackages[0] -ceq $sample.PackageFullName) 'Unexpected package removal.'
+    Pass 'Only the exact current-user Game Bar package is removed (mocked Appx)'
+
+    $script:mockPackages=@($sample,[pscustomobject]@{Name='Microsoft.GamingServices';PublisherId='8wekyb3d8bbwe';PackageFullName='Microsoft.GamingServices_1.0.0.0_x64__8wekyb3d8bbwe'})
+    $script:removedPackages=@()
+    Expect-Failure {Remove-CurrentUserGameBar}
+    Assert-True ($script:removedPackages.Count -eq 0) 'An unrelated package caused partial removal.'
+    Pass 'Unexpected package identity rejected before any removal (mocked Appx)'
+
+    $script:mockPackages=@([pscustomobject]@{Name='Microsoft.XboxGamingOverlay';PublisherId='otherpublisher';PackageFullName='Microsoft.XboxGamingOverlay_1.0.0.0_x64__otherpublisher'})
+    Expect-Failure {Remove-CurrentUserGameBar}
+    Assert-True ($script:removedPackages.Count -eq 0) 'An unexpected publisher was accepted.'
+    Pass 'Unexpected publisher rejected (mocked Appx)'
+
+    $script:mockPackages=@($sample)
+    $script:failRemoval=$true
+    Expect-Failure {Remove-CurrentUserGameBar}
+    Assert-True ($script:mockPackages.Count -eq 1) 'Removal failure was ignored.'
+    $script:failRemoval=$false
+    Pass 'Package manager failure is propagated (mocked Appx)'
+
+    $script:keepPackage=$true
+    Expect-Failure {Remove-CurrentUserGameBar}
+    Assert-True ($script:mockPackages.Count -eq 1) 'Test fixture lost the retained package.'
+    Pass 'Uninstall verifies the package actually disappeared (mocked Appx)'
+
+    Write-Host ("All $passed tests passed. Real Game Bar keys and installed apps were not modified.")
 } finally {
     $root.Dispose()
     # This exact newly created GUID key is owned solely by this test invocation.
